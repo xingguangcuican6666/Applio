@@ -8,7 +8,6 @@ import torchaudio.transforms as tat
 
 from rvc.lib.user_config import resolve_logs_path
 from rvc.lib.utils import load_embedding
-from .core import AUDIO_SAMPLE_RATE
 from .pipeline import RealtimeVoiceConverter, strip_parametrizations
 from .utils.chunks import automatic_block_frame
 from .utils.torch import IndexWrapper
@@ -143,7 +142,7 @@ def apply_config_update(instance, current, message):
     kwargs = {}
     model.kwargs = None
     resample = (
-        tat.Resample(voice.tgt_sr, AUDIO_SAMPLE_RATE, dtype=torch.float32).to(
+        tat.Resample(voice.tgt_sr, model.device_sample_rate, dtype=torch.float32).to(
             instance.device
         )
         if replaced
@@ -185,8 +184,10 @@ def apply_config_update(instance, current, message):
         model.formant_timbre = float(candidate.get("formant_timbre", 1.0))
     except (TypeError, ValueError):
         raise ValueError("Invalid formant_timbre")
-    crossfade = round(candidate.get("cross_fade_overlap_size", 0.1) * AUDIO_SAMPLE_RATE)
-    extra = round(candidate.get("extra_convert_size", 0.5) * AUDIO_SAMPLE_RATE)
+    crossfade = round(
+        candidate.get("cross_fade_overlap_size", 0.1) * model.device_sample_rate
+    )
+    extra = round(candidate.get("extra_convert_size", 0.5) * model.device_sample_rate)
     if (block, crossfade, extra) != (
         instance.block_frame,
         instance.crossfade_frame,

@@ -67,9 +67,19 @@ install_ffmpeg() {
 }
 
 install_deps() {
-    if command -v dnf > /dev/null; then
+    # sounddevice binds to the system PortAudio library. Without it the
+    # realtime tab cannot list or open any device.
+    if command -v apt > /dev/null; then
+        log_message "Installing deps needed using apt..."
+        sudo apt update && sudo apt install -y libportaudio2
+    elif command -v pacman > /dev/null; then
+        log_message "Installing deps needed using pacman..."
+        sudo pacman -S --needed --noconfirm portaudio
+    elif command -v dnf > /dev/null; then
         log_message "Installing deps needed using dnf..."
-        sudo dnf install -y portaudio --allowerasing 
+        sudo dnf install -y portaudio --allowerasing
+    else
+        log_message "Unsupported distribution for PortAudio installation. Install portaudio equivalent for your distribution and try again."
     fi
 }
 

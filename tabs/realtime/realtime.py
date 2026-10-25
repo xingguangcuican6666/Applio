@@ -12,7 +12,13 @@ now_dir = os.getcwd()
 sys.path.append(now_dir)
 
 from rvc.realtime.callbacks import AudioCallbacks
-from rvc.realtime.audio import list_audio_device, resolve_sample_rate
+from rvc.realtime.audio import (
+    clear_device_cache,
+    find_device,
+    list_audio_device,
+    preflight_devices,
+    resolve_sample_rate,
+)
 from rvc.realtime.core import AUDIO_SAMPLE_RATE
 
 from assets.i18n.i18n import I18nAuto
@@ -413,10 +419,20 @@ def load_realtime_settings():
 
 
 def get_safe_dropdown_value(saved_value, choices, fallback_value=None):
-    """Safely get a dropdown value, ensuring it exists in choices"""
+    """Safely get a dropdown value, ensuring it exists in choices.
+
+    Older settings stored the device as "<index>: <name> (<host API>)". The
+    index is not part of the identity of a device, because it moves whenever
+    PipeWire nodes come and go, so such a setting is matched by name.
+    """
     if saved_value and saved_value in choices:
         return saved_value
-    elif fallback_value and fallback_value in choices:
+    if saved_value and isinstance(saved_value, str):
+        stripped = saved_value.split(": ", 1)[-1]
+        for choice in choices:
+            if choice == stripped:
+                return choice
+    if fallback_value and fallback_value in choices:
         return fallback_value
     elif choices:
         return choices[0]
@@ -572,12 +588,21 @@ def start_realtime(
 
     try:
         input_devices, output_devices = get_audio_devices_formatted()
-        input_device_id = input_devices[input_audio_device]
-        output_device_id = output_devices[output_audio_device]
-        output_monitor_id = (
-            output_devices[monitor_output_device] if use_monitor_device else None
+        # The label is the stable identity of a device. The stored index is
+        # only a hint: it shifts when PipeWire nodes come and go, so the
+        # device is looked up again by its name and host API.
+        input_device = find_device(input_audio_device, "input")
+        output_device = find_device(output_audio_device, "output")
+        output_monitor_device = (
+            find_device(monitor_output_device, "output")
+            if use_monitor_device
+            else None
         )
-    except (ValueError, IndexError):
+        if input_device is None or output_device is None:
+            raise KeyError(input_audio_device)
+        if use_monitor_device and output_monitor_device is None:
+            raise KeyError(monitor_output_device)
+    except (ValueError, IndexError, KeyError):
         _cleanup_realtime()
         print(f"Error: incorrectly formatted audio device.")
         yield (
@@ -592,9 +617,26 @@ def start_realtime(
     asio_enabled = _rt_cfg["asio_enabled"]
     audio_sample_rate = _rt_cfg["audio_sample_rate"]
     audio_sample_rate = resolve_sample_rate(
-        input_device_id, asio_enabled, audio_sample_rate
+        input_device, asio_enabled, audio_sample_rate, output_device
     )
     block_frame = int(chunk_size * audio_sample_rate / 1000)
+
+    # A JACK pair that deadlocks the audio server cannot be recovered from, so
+    # it is tested in a throwaway process before the model is even loaded.
+    if "JACK" in input_device.host_api and "JACK" in output_device.host_api:
+        problem = preflight_devices(
+            input_device,
+            output_device,
+            input_device.input_channels or input_device.max_input_channels,
+            output_device.output_channels or output_device.max_output_channels,
+            audio_sample_rate,
+            block_frame,
+        )
+        if problem:
+            _cleanup_realtime()
+            print(f"Error: {problem}")
+            yield i18n("Error: {}").format(problem), interactive_true, interactive_false
+            return
 
     callbacks_kwargs = {
         "pass_through": PASS_THROUGH,
@@ -637,9 +679,9 @@ def start_realtime(
     audio_manager = callbacks.audio
     try:
         audio_manager.start(
-            input_device_id=input_device_id,
-            output_device_id=output_device_id,
-            output_monitor_id=output_monitor_id,
+            input_device=input_device,
+            output_device=output_device,
+            output_monitor_device=output_monitor_device,
             exclusive_mode=exclusive_mode,
             asio_input_channel=input_asio_channels if asio_enabled else -1,
             asio_output_channel=output_asio_channels if asio_enabled else -1,
@@ -770,11 +812,12 @@ def change_callbacks_config():
 
         # It will need to create a new stream to work.
         # callbacks.vc.block_frame = callbacks_kwargs.get("block_frame", 192)
+        device_sample_rate = callbacks_kwargs.get("audio_sample_rate", AUDIO_SAMPLE_RATE)
         crossfade_frame = int(
-            callbacks_kwargs.get("cross_fade_overlap_size", 0.1) * AUDIO_SAMPLE_RATE
+            callbacks_kwargs.get("cross_fade_overlap_size", 0.1) * device_sample_rate
         )
         extra_frame = int(
-            callbacks_kwargs.get("extra_convert_size", 0.5) * AUDIO_SAMPLE_RATE
+            callbacks_kwargs.get("extra_convert_size", 0.5) * device_sample_rate
         )
 
         cfg = {}
@@ -860,6 +903,12 @@ def stop_realtime():
 
 
 def get_audio_devices_formatted():
+    """Return the device lists, keyed by a stable label.
+
+    The label carries the device name and the host API. The PortAudio index
+    is deliberately left out: it moves whenever PipeWire nodes appear or
+    disappear, which would break a saved selection on the next refresh.
+    """
     try:
         input_devices, output_devices = list_audio_device()
 
@@ -876,14 +925,8 @@ def get_audio_devices_formatted():
             input_devices, key=lambda d: priority(d.name), reverse=True
         )
 
-        input_device_list = {
-            f"{input_sorted.index(d)+1}: {d.name} ({d.host_api})": d.index
-            for d in input_sorted
-        }
-        output_device_list = {
-            f"{output_sorted.index(d)+1}: {d.name} ({d.host_api})": d.index
-            for d in output_sorted
-        }
+        input_device_list = {d.label: d.index for d in input_sorted}
+        output_device_list = {d.label: d.index for d in output_sorted}
 
         return input_device_list, output_device_list
     except Exception:
@@ -1502,6 +1545,8 @@ def realtime_tab():
         def refresh_devices():
             sd._terminate()
             sd._initialize()
+            # The capabilities of a device may have changed with it.
+            clear_device_cache()
 
             input_choices, output_choices = get_audio_devices_formatted()
             input_choices, output_choices = list(input_choices.keys()), list(

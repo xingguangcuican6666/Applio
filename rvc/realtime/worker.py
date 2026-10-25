@@ -142,7 +142,7 @@ def _apply_config(vc: VoiceChanger, cfg):
         vc.vc_model.pipeline.tgt_sr = vc.vc_model.pipeline.vc.tgt_sr
         vc.vc_model.resample_out = tat.Resample(
             orig_freq=vc.vc_model.pipeline.tgt_sr,
-            new_freq=AUDIO_SAMPLE_RATE,
+            new_freq=vc.vc_model.device_sample_rate,
             dtype=torch.float32,
         ).to(vc.vc_model.device)
         vc.vc_model.reduced_noise = None
@@ -223,14 +223,18 @@ class VoiceChangerWorker:
         self._vc_kwargs = vc_kwargs
         self._process = None
         # Cached state for main-process reads (change_callbacks_config / UI).
+        # Frames are counted in device samples, so the device rate is used.
+        self.device_sample_rate = int(
+            vc_kwargs.get("audio_sample_rate") or AUDIO_SAMPLE_RATE
+        )
         self.crossfade_frame = int(
-            vc_kwargs.get("cross_fade_overlap_size", 0.1) * AUDIO_SAMPLE_RATE
+            vc_kwargs.get("cross_fade_overlap_size", 0.1) * self.device_sample_rate
         )
         self.extra_frame = int(
-            vc_kwargs.get("extra_convert_size", 0.5) * AUDIO_SAMPLE_RATE
+            vc_kwargs.get("extra_convert_size", 0.5) * self.device_sample_rate
         )
         self.block_frame = vc_kwargs.get("block_frame", 24576)
-        self.sola_search_frame = AUDIO_SAMPLE_RATE // 100
+        self.sola_search_frame = self.device_sample_rate // 100
         self.vc_model = _RealtimeState()
 
     @property

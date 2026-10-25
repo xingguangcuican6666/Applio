@@ -117,6 +117,11 @@ class Realtime:
         self.return_length = 0
         self.skip_head = 0
         self.silence_front = 0
+        # Rate the audio device actually runs at. The model pipeline is built
+        # around it, so a device that is not 48 kHz does not shift pitch.
+        self.device_sample_rate = int(
+            kwargs.get("audio_sample_rate") or AUDIO_SAMPLE_RATE
+        )
         # Convert dB to RMS
         self.input_sensitivity = 10 ** (silent_threshold / 20)
         self.window_size = self.sample_rate // 100
@@ -161,11 +166,13 @@ class Realtime:
         self.reduced_noise = None
         # Resampling of inputs and outputs.
         self.resample_in = tat.Resample(
-            orig_freq=AUDIO_SAMPLE_RATE, new_freq=self.sample_rate, dtype=torch.float32
+            orig_freq=self.device_sample_rate,
+            new_freq=self.sample_rate,
+            dtype=torch.float32,
         ).to(self.device)
         self.resample_out = tat.Resample(
             orig_freq=self.pipeline.tgt_sr,
-            new_freq=AUDIO_SAMPLE_RATE,
+            new_freq=self.device_sample_rate,
             dtype=torch.float32,
         ).to(self.device)
 
@@ -177,14 +184,11 @@ class Realtime:
         sola_search_frame: int,
     ):
         # Calculate frame sizes based on DEVICE sample rate (f.e., 48000Hz) and convert to 16000Hz
-        block_frame_16k = int(block_frame / AUDIO_SAMPLE_RATE * self.sample_rate)
-        crossfade_frame_16k = int(
-            crossfade_frame / AUDIO_SAMPLE_RATE * self.sample_rate
-        )
-        sola_search_frame_16k = int(
-            sola_search_frame / AUDIO_SAMPLE_RATE * self.sample_rate
-        )
-        extra_frame_16k = int(extra_frame / AUDIO_SAMPLE_RATE * self.sample_rate)
+        device_rate = self.device_sample_rate
+        block_frame_16k = int(block_frame / device_rate * self.sample_rate)
+        crossfade_frame_16k = int(crossfade_frame / device_rate * self.sample_rate)
+        sola_search_frame_16k = int(sola_search_frame / device_rate * self.sample_rate)
+        extra_frame_16k = int(extra_frame / device_rate * self.sample_rate)
 
         convert_size_16k = (
             block_frame_16k
@@ -368,9 +372,14 @@ class VoiceChanger:
         self.record_audio_path = record_audio_path
         self.export_format = export_format
         self.block_frame = block_frame
-        self.crossfade_frame = int(cross_fade_overlap_size * AUDIO_SAMPLE_RATE)
-        self.extra_frame = int(extra_convert_size * AUDIO_SAMPLE_RATE)
-        self.sola_search_frame = AUDIO_SAMPLE_RATE // 100
+        # Frames are counted in device samples, so a device that does not run
+        # at 48 kHz keeps the same time based durations.
+        self.device_sample_rate = int(
+            kwargs.get("audio_sample_rate") or AUDIO_SAMPLE_RATE
+        )
+        self.crossfade_frame = int(cross_fade_overlap_size * self.device_sample_rate)
+        self.extra_frame = int(extra_convert_size * self.device_sample_rate)
+        self.sola_search_frame = self.device_sample_rate // 100
         self.sola_buffer = None
         self.vc_model = Realtime(
             model_path,
@@ -493,7 +502,7 @@ class VoiceChanger:
             sf.SoundFile(
                 self.record_audio_path,
                 mode="w",
-                samplerate=AUDIO_SAMPLE_RATE,
+                samplerate=self.device_sample_rate,
                 channels=1,
                 format=self.export_format.lower(),
             )
